@@ -1,0 +1,239 @@
+# -*- coding: utf-8 -*-
+"""
+豆瓣TOP250数据分析与可视化
+包含：数据清洗、统计分析、情感分析、图表生成
+"""
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+from wordcloud import WordCloud
+import jieba
+from snownlp import SnowNLP
+import re
+from collections import Counter
+
+# 设置中文显示
+plt.rcParams['font.sans-serif'] = ['SimHei']  # 用于显示中文
+plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
+
+
+# ==================== 1. 数据加载与清洗 ====================
+def load_and_clean_data(csv_path="豆瓣TOP250完整数据.csv"):
+    """读取CSV，进行数据清洗和类型转换"""
+    df = pd.read_csv(csv_path, encoding='utf-8-sig')
+
+    # 删除完全重复行（如果有）
+    df.drop_duplicates(inplace=True)
+
+    # 转换评分和评价人数为数值
+    df['评分'] = pd.to_numeric(df['评分'], errors='coerce')
+    # 评价人数：如"2,323,697人评价" -> 2323697
+    df['评价人数'] = df['评价人数'].astype(str).str.replace('人评价', '').str.replace(',', '')
+    df['评价人数'] = pd.to_numeric(df['评价人数'], errors='coerce')
+
+    # 提取年份（如果缺失，从简介或其他字段补，这里简单处理）
+    # 年份字段可能已经是数字，确保为整数
+    df['年份'] = pd.to_numeric(df['年份'], errors='coerce').fillna(0).astype(int)
+
+    # 处理类型：拆分多个类型（如"剧情 / 爱情 / 同性" -> 列表）
+    df['类型列表'] = df['类型'].astype(str).apply(lambda x: [t.strip() for t in x.split('/')] if pd.notna(x) else [])
+
+    # 处理短评：将多条短评拆分为列表（每条短评文本）
+    def extract_comment_text(comments_str):
+        if pd.isna(comments_str) or comments_str == '无短评' or comments_str == '短评抓取失败':
+            return []
+        # 短评格式："用户(★)：内容【时间】 | 用户(★)：内容【时间】"
+        # 提取内容部分（去掉用户名和星星和时间）
+        items = comments_str.split(' | ')
+        texts = []
+        for item in items:
+            # 匹配括号内的星星和后面的内容
+            match = re.search(r'[：:](.*?)【', item)
+            if match:
+                texts.append(match.group(1).strip())
+            else:
+                # 如果没有【时间】，尝试另一种
+                parts = item.split('：')
+                if len(parts) > 1:
+                    texts.append(parts[1].split('【')[0].strip())
+        return texts
+
+    df['短评文本列表'] = df['短评'].apply(extract_comment_text)
+    # 将所有短评合并为一个长文本用于词云
+    df['全部短评文本'] = df['短评文本列表'].apply(lambda x: ' '.join(x))
+
+    return df
+
+
+# ==================== 2. 统计分析 ====================
+def statistical_analysis(df):
+    """输出各类统计结果"""
+    print("\n========== 统计分析 ==========")
+
+    # 高分电影Top10
+    top10 = df.nlargest(10, '评分')[['排名', '中文标题', '评分', '评价人数', '年份']]
+    print("\n高分电影Top10：")
+    print(top10.to_string(index=False))
+
+    # 导演分布（出现次数最多的10位）
+    # 导演字段可能有多个导演？通常只有一位，直接统计
+    director_counts = df['导演'].value_counts().head(10)
+    print("\n作品数量最多的导演Top10：")
+    for director, count in director_counts.items():
+        print(f"{director}: {count}部")
+
+    # 类型分布（拆分统计）
+    all_types = [t for sublist in df['类型列表'] for t in sublist]
+    type_counts = Counter(all_types).most_common(10)
+    print("\n类型分布Top10：")
+    for t, count in type_counts:
+        print(f"{t}: {count}次")
+
+    # 评分与评价人数的相关性
+    corr = df['评分'].corr(df['评价人数'])
+    print(f"\n评分与评价人数的相关系数: {corr:.3f}")
+
+    # 情感分析（对所有短评）
+    print("\n正在进行短评情感分析（使用SnowNLP）...")
+    sentiments = []
+    for text in df['全部短评文本']:
+        if text.strip():
+            s = SnowNLP(text)
+            sentiments.append(s.sentiments)  # 0-1之间，越接近1越正面
+    if sentiments:
+        positive = sum(1 for s in sentiments if s > 0.6)
+        neutral = sum(1 for s in sentiments if 0.4 <= s <= 0.6)
+        negative = sum(1 for s in sentiments if s < 0.4)
+        total = len(sentiments)
+        print(f"情感比例：正面 {positive / total:.1%}，中性 {neutral / total:.1%}，负面 {negative / total:.1%}")
+    else:
+        print("无有效短评数据，无法进行情感分析")
+
+
+# ==================== 3. 可视化图表 ====================
+def plot_histogram(df):
+    """评分分布直方图"""
+    plt.figure(figsize=(8, 5))
+    plt.hist(df['评分'].dropna(), bins=20, edgecolor='black', alpha=0.7)
+    plt.title('豆瓣TOP250电影评分分布')
+    plt.xlabel('评分')
+    plt.ylabel('电影数量')
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    plt.savefig('评分分布直方图.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+def plot_pie_chart(df):
+    """类型饼图（前10类型）"""
+    all_types = [t for sublist in df['类型列表'] for t in sublist]
+    type_counts = Counter(all_types).most_common(10)
+    labels = [t[0] for t in type_counts]
+    sizes = [t[1] for t in type_counts]
+    plt.figure(figsize=(8, 8))
+    plt.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90)
+    plt.title('豆瓣TOP250电影类型分布（Top10）')
+    plt.savefig('类型饼图.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+def plot_scatter(df):
+    """评分与评价人数散点图"""
+    plt.figure(figsize=(8, 5))
+    plt.scatter(df['评分'], df['评价人数'], alpha=0.6, c='steelblue')
+    plt.title('评分与评价人数关系')
+    plt.xlabel('评分')
+    plt.ylabel('评价人数（万人）')
+    # 将评价人数显示为万
+    plt.ticklabel_format(axis='y', style='plain')
+    plt.grid(True, linestyle='--', alpha=0.5)
+    plt.savefig('评分_评价人数散点图.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+def plot_wordcloud(df):
+    """短评词云"""
+    # 合并所有短评文本
+    all_comments = ' '.join(df['全部短评文本'].dropna())
+    if not all_comments.strip():
+        print("无短评文本，无法生成词云")
+        return
+
+    # 中文分词
+    words = jieba.cut(all_comments)
+    # 去除单字和停用词（简单停用词表）
+    stopwords = set(
+        ['的', '了', '是', '在', '我', '有', '和', '就', '不', '人', '都', '一', '一个', '也', '很', '到', '说', '要',
+         '去', '你', '会', '着', '没有', '看', '好', '这', '那', '但', '又', '给', '被', '对', '能', '还', '只', '所以',
+         '因为', '而且', '然后', '但是', '如果', '这个', '那个', '我们', '你们', '他们', '自己', '什么', '怎么', '这样',
+         '那样', '可以', '不会', '还是', '可能', '觉得'])
+    words = [w for w in words if len(w) > 1 and w not in stopwords]
+    text = ' '.join(words)
+
+    # 生成词云
+    wc = WordCloud(font_path='simhei.ttf',  # 需存在中文字体，若无则用默认但会乱码
+                   background_color='white',
+                   max_words=100,
+                   width=800, height=600,
+                   random_state=42)
+    wc.generate(text)
+
+    plt.figure(figsize=(10, 6))
+    plt.imshow(wc, interpolation='bilinear')
+    plt.axis('off')
+    plt.title('短评词云')
+    plt.savefig('短评词云.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+def plot_trend(df):
+    """年份趋势：每年电影数量与平均评分"""
+    # 过滤年份有效数据
+    year_data = df[df['年份'] > 0].groupby('年份').agg(
+        电影数量=('年份', 'count'),
+        平均评分=('评分', 'mean')
+    ).reset_index()
+
+    fig, ax1 = plt.subplots(figsize=(12, 6))
+
+    # 柱状图：电影数量
+    ax1.bar(year_data['年份'], year_data['电影数量'], alpha=0.6, color='skyblue', label='电影数量')
+    ax1.set_xlabel('年份')
+    ax1.set_ylabel('电影数量', color='blue')
+    ax1.tick_params(axis='y', labelcolor='blue')
+
+    # 折线图：平均评分
+    ax2 = ax1.twinx()
+    ax2.plot(year_data['年份'], year_data['平均评分'], marker='o', color='red', linewidth=2, label='平均评分')
+    ax2.set_ylabel('平均评分', color='red')
+    ax2.tick_params(axis='y', labelcolor='red')
+
+    plt.title('豆瓣TOP250电影年份趋势')
+    plt.savefig('年份趋势图.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+# ==================== 4. 主函数 ====================
+def main():
+    # 加载并清洗数据
+    print("正在加载数据...")
+    df = load_and_clean_data()
+    print(f"数据加载完成，共 {len(df)} 条记录")
+
+    # 统计分析
+    statistical_analysis(df)
+
+    # 生成图表
+    print("\n正在生成图表...")
+    plot_histogram(df)
+    plot_pie_chart(df)
+    plot_scatter(df)
+    plot_wordcloud(df)
+    plot_trend(df)
+
+    print("\n所有图表已保存为PNG文件。")
+
+
+if __name__ == "__main__":
+    main()
